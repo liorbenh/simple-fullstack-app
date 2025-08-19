@@ -1,0 +1,23 @@
+{
+  "name": "sre-test-consumer",
+  "version": "1.0.0",
+  "description": "SRE Test CDC Consumer Service",
+  "main": "src/consumer.js",
+  "scripts": {
+    "start": "node src/consumer.js",
+    "dev": "nodemon src/consumer.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "kafkajs": "^2.2.4",
+    "log4js": "^6.9.1",
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "jest": "^29.6.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
