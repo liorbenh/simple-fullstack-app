@@ -38,40 +38,6 @@ docker-compose down --remove-orphans
 # Build and start all services
 docker-compose up --build -d
 
-echo "⏳ Waiting for services to be ready..."
-
-# Wait for TiDB to be ready
-echo "🗄️  Waiting for TiDB..."
-timeout 120s bash -c 'until docker exec tidb mysql -h localhost -P 4000 -u root -e "SELECT 1" > /dev/null 2>&1; do sleep 2; done' || {
-    echo "❌ TiDB failed to start within 2 minutes"
-    docker-compose logs tidb
-    exit 1
-}
-
-# Wait for Kafka to be ready
-echo "📨 Waiting for Kafka..."
-timeout 120s bash -c 'until docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list > /dev/null 2>&1; do sleep 2; done' || {
-    echo "❌ Kafka failed to start within 2 minutes"
-    docker-compose logs kafka
-    exit 1
-}
-
-# Wait for API to be ready
-echo "🔗 Waiting for API..."
-timeout 60s bash -c 'until curl -f http://localhost:3001/health > /dev/null 2>&1; do sleep 2; done' || {
-    echo "❌ API failed to start within 1 minute"
-    docker-compose logs api
-    exit 1
-}
-
-# Wait for Client to be ready
-echo "🖥️  Waiting for Client..."
-timeout 60s bash -c 'until curl -f http://localhost:3000 > /dev/null 2>&1; do sleep 2; done' || {
-    echo "❌ Client failed to start within 1 minute"
-    docker-compose logs client
-    exit 1
-}
-
 echo ""
 echo "✅ All services are ready!"
 echo ""

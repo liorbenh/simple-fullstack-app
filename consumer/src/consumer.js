@@ -205,17 +205,48 @@ app.listen(port, () => {
   logger.info(`Health check server running on port ${port}`);
 });
 
-// Start the consumer
+// Start the consumer with retry logic
 async function startConsumer() {
+  const maxRetries = 10;
+  const retryDelay = 15000; // 15 seconds
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      logger.info(`Starting CDC message processor (attempt ${attempt}/${maxRetries})...`);
+      
+      // Test Kafka connectivity first
+      await testKafkaConnection();
+      
+      // Start the processor
+      await processor.start();
+      logger.info('CDC Consumer started successfully');
+      return;
+      
+    } catch (error) {
+      logger.error(`Consumer startup attempt ${attempt} failed:`, error.message);
+      
+      if (attempt === maxRetries) {
+        logger.error('Max retry attempts reached. Exiting...');
+        process.exit(1);
+      }
+      
+      logger.info(`Retrying in ${retryDelay/1000} seconds...`);
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+    }
+  }
+}
+
+// Test Kafka connection
+async function testKafkaConnection() {
+  const admin = kafka.admin();
   try {
-    // Wait a bit for Kafka to be ready
-    await new Promise(resolve => setTimeout(resolve, 10000));
-    
-    logger.info('Starting CDC message processor...');
-    await processor.start();
+    await admin.connect();
+    await admin.listTopics();
+    logger.info('Kafka connectivity verified');
+    await admin.disconnect();
   } catch (error) {
-    logger.error('Failed to start consumer:', error);
-    process.exit(1);
+    await admin.disconnect();
+    throw new Error(`Kafka connection test failed: ${error.message}`);
   }
 }
 

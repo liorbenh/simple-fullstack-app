@@ -6,32 +6,11 @@
     "case-sensitive": false,
     "enable-old-value": true,
     "force-replicate": false,
-    "check-gc-safe-point": true,
     "filter": {
       "rules": ["sre_test.*"]
     },
     "sink": {
-      "protocol": "open-protocol",
-      "schema-registry": "",
-      "csv": {
-        "delimiter": ",",
-        "quote": "\"",
-        "null": "\\N",
-        "include-commit-ts": true
-      },
-      "column-selectors": [
-        {
-          "matcher": ["sre_test.*"],
-          "columns": ["*"]
-        }
-      ]
-    },
-    "cyclic-replication": {
-      "enable": false
-    },
-    "scheduler": {
-      "type": "table-number",
-      "polling-time": 30
+      "protocol": "open-protocol"
     }
   }
 }

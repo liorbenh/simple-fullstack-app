@@ -1,26 +1,30 @@
 version: '3.8'
 
 services:
-  # TiDB Database
-  tidb:
-    image: pingcap/tidb:latest
-    container_name: tidb
+  # PD (Placement Driver for TiDB cluster) - Must start first
+  pd:
+    image: pingcap/pd:latest
+    container_name: pd
     ports:
-      - "4000:4000"
-    environment:
-      - TIDB_VERSION=latest
+      - "2379:2379"
+      - "2380:2380"
     volumes:
-      - tidb_data:/tmp/tidb
-      - ./api/init:/docker-entrypoint-initdb.d
+      - pd_data:/tmp/pd
     networks:
       - sre-network
-    healthcheck:
-      test: ["CMD", "mysql", "-h", "localhost", "-P", "4000", "-u", "root", "-e", "SELECT 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
+    environment:
+      - GOGC=100
+    command:
+      - "--name=pd"
+      - "--data-dir=/tmp/pd"
+      - "--client-urls=http://0.0.0.0:2379"
+      - "--peer-urls=http://0.0.0.0:2380"
+      - "--advertise-client-urls=http://pd:2379"
+      - "--advertise-peer-urls=http://pd:2380"
+      - "--initial-cluster=pd=http://pd:2380"
+      - "--log-level=info"
 
-  # TiKV (required for TiDB)
+  # TiKV (Storage layer)
   tikv:
     image: pingcap/tikv:latest
     container_name: tikv
@@ -30,34 +34,48 @@ services:
       - tikv_data:/tmp/tikv
     networks:
       - sre-network
-    command: |
-      --addr 0.0.0.0:20160
-      --advertise-addr tikv:20160
-      --data-dir /tmp/tikv
-      --pd pd:2379
-
-  # PD (Placement Driver for TiDB cluster)
-  pd:
-    image: pingcap/pd:latest
-    container_name: pd
+    depends_on:
+      - pd
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+    command:
+      - "--addr=0.0.0.0:20160"
+      - "--advertise-addr=tikv:20160"
+      - "--data-dir=/tmp/tikv"
+      - "--pd-endpoints=pd:2379"
+      - "--log-level=info"
+    # TiDB Database
+  tidb:
+    image: pingcap/tidb:latest
+    container_name: tidb
     ports:
-      - "2379:2379"
+      - "4000:4000"
+      - "10080:10080"
+    environment:
+      - TIDB_VERSION=latest
     volumes:
-      - pd_data:/tmp/pd
+      - tidb_data:/tmp/tidb
+      - ./api/init:/docker-entrypoint-initdb.d
     networks:
       - sre-network
-    command: |
-      --name=pd
-      --data-dir=/tmp/pd
-      --client-urls=http://0.0.0.0:2379
-      --peer-urls=http://0.0.0.0:2380
-      --advertise-client-urls=http://pd:2379
-      --advertise-peer-urls=http://pd:2380
-      --initial-cluster=pd=http://pd:2380
-
+    depends_on:
+      tikv:
+        condition: service_started
+      pd:
+        condition: service_started
+    command:
+      - "--store=tikv"
+      - "--path=pd:2379"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 4000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
   # Zookeeper for Kafka
   zookeeper:
-    image: confluentinc/cp-zookeeper:latest
+    image: confluentinc/cp-zookeeper:7.4.0
     container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
@@ -67,10 +85,11 @@ services:
 
   # Kafka Message Broker
   kafka:
-    image: confluentinc/cp-kafka:latest
+    image: confluentinc/cp-kafka:7.4.0
     container_name: kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_started
     ports:
       - "9092:9092"
     environment:
@@ -81,60 +100,59 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 3000
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_NUM_PARTITIONS: 1
     networks:
       - sre-network
     healthcheck:
-      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server kafka:29092 || exit 1"]
       interval: 30s
       timeout: 10s
-      retries: 5
+      retries: 10
+      start_period: 60s
 
-  # TiDB CDC (Change Data Capture)
+  # TiDB CDC (Change Data Capture) - Simplified approach
   ticdc:
     image: pingcap/ticdc:latest
     container_name: ticdc
     depends_on:
-      tidb:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-    volumes:
-      - ./cdc-config:/config
-      - ticdc_data:/tmp/ticdc
+      - tidb
+      - kafka
     networks:
       - sre-network
     ports:
       - "8300:8300"
-    command: |
-      server
-      --addr=0.0.0.0:8300
-      --advertise-addr=ticdc:8300
-      --pd=http://pd:2379
-      --data-dir=/tmp/ticdc
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8300/status"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-
-  # CDC Task Creator (initializes CDC changefeed)
+    command:
+      - "/cdc"
+      - "server"
+      - "--addr=0.0.0.0:8300"
+      - "--advertise-addr=ticdc:8300"
+      - "--pd=http://pd:2379"
+      - "--log-level=info"
+  
+  # CDC Changefeed Creator
   cdc-init:
     image: curlimages/curl:latest
     container_name: cdc-init
     depends_on:
-      ticdc:
-        condition: service_healthy
+      - ticdc
     networks:
       - sre-network
     volumes:
       - ./cdc-config:/config
+    restart: "no"
     command: |
       sh -c "
-        sleep 30 &&
+        echo 'Waiting for TiCDC to be fully ready...' &&
+        sleep 60 &&
+        echo 'Creating CDC changefeed...' &&
         curl -X POST http://ticdc:8300/api/v1/changefeeds \
-        -H 'Content-Type: application/json' \
-        -d @/config/cdc-task.json
+          -H 'Content-Type: application/json' \
+          -d @/config/cdc-task.json &&
+        echo 'CDC changefeed created successfully'
       "
 
   # API Service
@@ -153,7 +171,7 @@ services:
       - DB_PASSWORD=
       - DB_NAME=sre_test
       - KAFKA_BROKERS=kafka:29092
-      - JWT_SECRET=your-secret-key-here
+      - JWT_SECRET=your-secret-key-here-change-in-production
     depends_on:
       tidb:
         condition: service_healthy
@@ -164,6 +182,12 @@ services:
     volumes:
       - ./api/src:/app/src
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 3001 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   # Consumer Service
   consumer:
@@ -174,9 +198,12 @@ services:
     environment:
       - KAFKA_BROKERS=kafka:29092
       - KAFKA_TOPIC=tidb-cdc-changes
+      - HEALTH_PORT=3002
     depends_on:
       kafka:
         condition: service_healthy
+      ticdc:
+        condition: service_started
       cdc-init:
         condition: service_completed_successfully
     networks:

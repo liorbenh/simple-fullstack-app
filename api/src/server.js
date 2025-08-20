@@ -50,40 +50,81 @@ app.use((req, res, next) => {
   next();
 });
 
-// Database connection
+// Database connection with connection pooling and reconnection
 const dbConfig = {
   host: process.env.DB_HOST || 'tidb',
   port: process.env.DB_PORT || 4000,
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'sre_test',
-  ssl: false
+  connectionLimit: 10,
+  queueLimit: 0
 };
 
 let db;
 
-// Initialize database connection
-async function initDatabase() {
+// Create database connection pool
+async function createDbPool() {
   try {
-    db = await mysql.createConnection(dbConfig);
-    logger.info('Connected to TiDB database');
+    logger.info('Creating database connection pool...');
+    db = mysql.createPool(dbConfig);
     
-    // Initialize database schema
-    await initSchema();
-    await createDefaultUser();
+    // Test the connection
+    await db.execute('SELECT 1');
+    logger.info('Database pool connected successfully');
     
+    return db;
   } catch (error) {
-    logger.error('Database connection failed:', error);
-    process.exit(1);
+    logger.error('Database pool creation failed:', error);
+    throw error;
+  }
+}
+
+// Initialize database with retry logic
+async function initDatabase() {
+  const maxRetries = 10;
+  const retryDelay = 5000;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      logger.info(`Attempting database connection (${attempt}/${maxRetries})...`);
+      
+      // First connect without database to create it
+      const tempConfig = { ...dbConfig };
+      delete tempConfig.database;
+      const tempDb = await mysql.createConnection(tempConfig);
+      
+      // Create database if not exists
+      await tempDb.execute('CREATE DATABASE IF NOT EXISTS sre_test');
+      await tempDb.end();
+      
+      // Now create pool with database specified
+      dbConfig.database = 'sre_test';
+      await createDbPool();
+      
+      logger.info('Connected to TiDB server');
+      await initSchema();
+      await createDefaultUser();
+      
+      return; // Success, exit retry loop
+      
+    } catch (error) {
+      logger.error(`Database connection attempt ${attempt} failed:`, error.message);
+      
+      if (attempt === maxRetries) {
+        logger.error('Max database connection attempts reached. Exiting...');
+        process.exit(1);
+      }
+      
+      logger.info(`Retrying in ${retryDelay/1000} seconds...`);
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+    }
   }
 }
 
 // Initialize database schema
 async function initSchema() {
   try {
-    // Create database if not exists
-    await db.execute('CREATE DATABASE IF NOT EXISTS sre_test');
-    await db.execute('USE sre_test');
+    logger.info('Initializing database schema...');
     
     // Create users table
     await db.execute(`
@@ -93,7 +134,9 @@ async function initSchema() {
         username VARCHAR(255) NOT NULL,
         password_hash VARCHAR(255) NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_email (email),
+        INDEX idx_username (username)
       )
     `);
     
@@ -107,7 +150,8 @@ async function initSchema() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
         INDEX idx_token_hash (token_hash),
-        INDEX idx_user_id (user_id)
+        INDEX idx_user_id (user_id),
+        INDEX idx_expires_at (expires_at)
       )
     `);
     
@@ -120,13 +164,18 @@ async function initSchema() {
         ip_address VARCHAR(45) NOT NULL,
         user_agent TEXT,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        additional_data JSON,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        INDEX idx_user_id (user_id),
+        INDEX idx_action (action),
+        INDEX idx_timestamp (timestamp)
       )
     `);
     
-    logger.info('Database schema initialized');
+    logger.info('Database schema initialized successfully');
   } catch (error) {
     logger.error('Schema initialization failed:', error);
+    throw error;
   }
 }
 
@@ -142,9 +191,12 @@ async function createDefaultUser() {
         ['admin@test.com', 'admin', hashedPassword]
       );
       logger.info('Default user created: admin@test.com / admin123');
+    } else {
+      logger.info('Default user already exists');
     }
   } catch (error) {
     logger.error('Failed to create default user:', error);
+    throw error;
   }
 }
 
